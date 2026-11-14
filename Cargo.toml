@@ -1,0 +1,44 @@
+[package]
+name = "zbugger"
+version = "0.1.0"
+edition = "2021"
+description = "A lightweight source editor with LLDB debugging and go-to-definition"
+
+[dependencies]
+eframe = { version = "0.31", features = ["persistence"] }
+egui = "0.31"
+hashbrown = "0.17.1"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+libmimalloc-sys = { version = "0.1.49", features = ["extended"] }
+mimalloc = "0.1.52"
+rayon = "1.12.0"
+rfd = "0.15"
+roxmltree = "0.21.2"
+serde = { version = "1", features = ["derive"] }
+tracy-client = { version = "0.19.0", default-features = false }
+tree-sitter = "0.27.2"
+tree-sitter-cpp = "0.23.4"
+
+[features]
+# Record profiling zones for the Tracy profiler (protocol 0.14.1). Without this
+# feature every zone compiles to nothing. Stack sampling and system tracing are
+# left off: they need admin rights and make captures much larger.
+tracy = ["tracy-client/enable", "tracy-client/flush-on-exit", "tracy-client/only-localhost"]
+
+[profile.release]
+opt-level = 3
+
+# Release speed with symbols, for profiling with Tracy:
+#   cargo build --profile profiling --features tracy
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
+
+# Optimize dependencies (tree-sitter, egui) even in debug builds so the editor
+# stays responsive; our own crate keeps full debug info and no optimization.
+[profile.dev.package."*"]
+opt-level = 3
+
+[dev-dependencies]
+tempfile = "3.27.0"

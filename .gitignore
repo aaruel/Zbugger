@@ -1,0 +1,8 @@
+/target
+/tools
+
+# Profiling output: Tracy captures, exported zone statistics, and the
+# scripted profiling run's frame timings (see src/profiling.rs).
+/profiles/
+*.tracy
+profile_frames.txt

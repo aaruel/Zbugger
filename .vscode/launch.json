@@ -1,0 +1,65 @@
+{
+    // Debug configurations for Zbugger. Requires the CodeLLDB extension
+    // (vadimcn.vscode-lldb), which builds through cargo before launching.
+    //
+    // _NO_DEBUG_HEAP=1: when Windows starts a program under a debugger it
+    // switches on its debug heap, which checks every allocation and free.
+    // Indexing allocates millions of small blocks, and with the debug heap
+    // opening + indexing a large Unreal solution went from ~13 s to over
+    // 10 minutes. This turns it off; heap bugs are better caught by Rust anyway.
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug zbugger",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": ["build", "--bin=zbugger", "--package=zbugger"],
+                "filter": { "name": "zbugger", "kind": "bin" }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "env": { "_NO_DEBUG_HEAP": "1" },
+            "sourceLanguages": ["rust"]
+        },
+        {
+            "name": "Debug zbugger (open current file)",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": ["build", "--bin=zbugger", "--package=zbugger"],
+                "filter": { "name": "zbugger", "kind": "bin" }
+            },
+            "args": ["${file}"],
+            "cwd": "${workspaceFolder}",
+            "env": { "_NO_DEBUG_HEAP": "1" },
+            "sourceLanguages": ["rust"]
+        },
+        {
+            "name": "Debug zbugger (release)",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": ["build", "--release", "--bin=zbugger", "--package=zbugger"],
+                "filter": { "name": "zbugger", "kind": "bin" }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "env": { "_NO_DEBUG_HEAP": "1" },
+            "sourceLanguages": ["rust"]
+        },
+        {
+            "name": "Debug unit tests",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": ["test", "--no-run", "--bin=zbugger", "--package=zbugger"],
+                "filter": { "name": "zbugger", "kind": "bin" }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "env": { "_NO_DEBUG_HEAP": "1" },
+            "sourceLanguages": ["rust"]
+        }
+    ]
+}
