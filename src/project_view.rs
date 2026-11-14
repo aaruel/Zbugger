@@ -57,6 +57,8 @@ pub struct ProjectView {
     warnings: Vec<String>,
     /// C++ files from every loaded project, deduplicated, for indexing.
     index_files: Vec<PathBuf>,
+    /// For Unreal solutions: the engine directory and the solution's module names.
+    unreal_engine: Option<(PathBuf, Vec<String>)>,
     /// The tree, with the invisible root at index 0.
     nodes: Vec<Node>,
     expanded: HashSet<usize>,
@@ -114,6 +116,12 @@ impl ProjectView {
     /// The C++ files to index, handed over once (they're only needed at load).
     pub fn take_index_files(&mut self) -> Vec<PathBuf> {
         std::mem::take(&mut self.index_files)
+    }
+
+    /// For an Unreal solution, the engine directory and the module names
+    /// (for `ENGINE_API`-style export macros).
+    pub fn unreal_engine(&self) -> Option<(&Path, &[String])> {
+        self.unreal_engine.as_ref().map(|(dir, modules)| (dir.as_path(), modules.as_slice()))
     }
 
     /// Expand every folder and project (used by the profiling run).
@@ -360,6 +368,10 @@ struct TreeBuilder {
     warnings: Vec<String>,
     seen_files: HashSet<PathBuf>,
     index_files: Vec<PathBuf>,
+    /// The engine's `ObjectMacros.h`, if the solution includes the engine.
+    object_macros: Option<PathBuf>,
+    /// Module names from `<Module>.Build.cs` files.
+    modules: Vec<String>,
 }
 
 impl TreeBuilder {
@@ -374,6 +386,12 @@ impl TreeBuilder {
     }
 
     fn add_file(&mut self, parent: usize, path: &Path, problem: Option<String>) {
+        if self.object_macros.is_none() && crate::unreal::is_object_macros(path) {
+            self.object_macros = Some(path.to_path_buf());
+        }
+        if let Some(module) = crate::unreal::module_from_build_file(path) {
+            self.modules.push(module);
+        }
         let key = path_key(path);
         if problem.is_none() && self.seen_files.insert(key.clone()) && is_cpp(path) {
             self.index_files.push(path.to_path_buf());
@@ -480,6 +498,11 @@ impl TreeBuilder {
             title,
             warnings: self.warnings,
             index_files: self.index_files,
+            unreal_engine: self
+                .object_macros
+                .as_deref()
+                .and_then(crate::unreal::engine_dir_from_object_macros)
+                .map(|engine| (engine, self.modules)),
             nodes: self.nodes,
             expanded: HashSet::new(),
             rows: Vec::new(),

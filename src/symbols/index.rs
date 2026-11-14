@@ -87,6 +87,9 @@ pub struct SymbolIndex {
     /// References for files updated since `postings` was built.
     overlay: HashMap<StrId, Vec<SymbolRef>>,
     overlay_len: usize,
+    /// Fingerprint of the Unreal profile the index was built with (0 for
+    /// none); part of the cache version.
+    pub(super) unreal_fingerprint: u64,
 }
 
 /// Symbols extracted from one file, with string ids into a separate (per
@@ -165,9 +168,15 @@ impl SymbolIndex {
 
     /// Re-index one file from `text` (e.g. an open document with unsaved
     /// edits). Its stamp is left unknown, so the next refresh re-checks it.
-    pub fn update_file_text(&mut self, parser: &mut tree_sitter::Parser, path: &Path, text: &str) {
+    pub fn update_file_text(
+        &mut self,
+        parser: &mut tree_sitter::Parser,
+        path: &Path,
+        text: &str,
+        unreal: Option<&crate::unreal::UnrealProfile>,
+    ) {
         let mut strings = StringTable::default();
-        let records = super::extract::extract(parser, text, &mut strings);
+        let records = super::extract::extract(parser, text, &mut strings, unreal);
         self.replace_file(path, FileStamp::default(), &records, &strings);
     }
 

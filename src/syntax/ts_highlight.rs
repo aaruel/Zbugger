@@ -15,9 +15,7 @@ use std::cmp::Reverse;
 use std::ops::Range;
 use std::sync::OnceLock;
 
-#[cfg(test)]
-use tree_sitter::Point;
-use tree_sitter::{InputEdit, Parser, Query, QueryCursor, StreamingIterator, Tree};
+use tree_sitter::{InputEdit, Point, Parser, Query, QueryCursor, StreamingIterator, Tree};
 
 use super::{Span, TokenKind};
 
@@ -220,8 +218,7 @@ impl IncrementalHighlighter {
 
 /// Describe the change from `old` to `new` as a single edit, by trimming the
 /// common prefix and suffix.
-#[cfg(test)]
-fn input_edit(old: &str, new: &str) -> InputEdit {
+pub fn input_edit(old: &str, new: &str) -> InputEdit {
     let (o, n) = (old.as_bytes(), new.as_bytes());
     let mut prefix = o.iter().zip(n).take_while(|(a, b)| a == b).count();
     while !new.is_char_boundary(prefix) {
@@ -242,14 +239,12 @@ fn input_edit(old: &str, new: &str) -> InputEdit {
     }
 }
 
-#[cfg(test)]
 fn point_at(text: &str, byte: usize) -> Point {
     let before = &text[..byte];
     let column = byte - line_start(text, byte);
     Point { row: count_newlines(before), column }
 }
 
-#[cfg(test)]
 fn count_newlines(text: &str) -> usize {
     text.bytes().filter(|&b| b == b'\n').count()
 }

@@ -65,7 +65,7 @@ int main() {
 /// Everything indexed from `text`, as if it were the file `path`.
 fn symbols(path: &str, text: &str) -> Vec<Symbol> {
     let mut index = SymbolIndex::default();
-    index.update_file_text(&mut new_parser(), Path::new(path), text);
+    index.update_file_text(&mut new_parser(), Path::new(path), text, None);
     index.symbols_in_file(Path::new(path))
 }
 
@@ -139,8 +139,8 @@ fn reference_context() {
 
 fn index() -> SymbolIndex {
     let mut index = SymbolIndex::default();
-    index.update_file_text(&mut new_parser(), Path::new("stack.h"), HEADER);
-    index.update_file_text(&mut new_parser(), Path::new("stack.cpp"), SOURCE);
+    index.update_file_text(&mut new_parser(), Path::new("stack.h"), HEADER, None);
+    index.update_file_text(&mut new_parser(), Path::new("stack.cpp"), SOURCE, None);
     index
 }
 
@@ -184,7 +184,7 @@ fn real_project_index() {
         .map(|i| i.path.clone())
         .collect();
     let start = std::time::Instant::now();
-    let (index, stats, _) = refresh(&files, None, &Progress::default());
+    let (index, stats, _) = refresh(&files, None, &Progress::default(), None);
     println!("indexed {} files, {} symbols in {:?} ({stats:?})", index.file_count(), index.symbol_count(), start.elapsed());
     for lookup in std::env::var("ZBUGGER_LOOKUP").unwrap_or_default().split(',').filter(|s| !s.is_empty()) {
         // Build a snippet so the lookup gets the same context as in code.
@@ -212,7 +212,7 @@ fn real_project_index() {
 fn reindexing_a_file_replaces_its_symbols() {
     let mut index = index();
     let before = index.symbol_count();
-    index.update_file_text(&mut new_parser(), Path::new("stack.cpp"), "void only_this() {}");
+    index.update_file_text(&mut new_parser(), Path::new("stack.cpp"), "void only_this() {}", None);
     assert!(index.symbol_count() < before);
     let r = reference_at("only_this", 0).unwrap();
     assert_eq!(index.find(&r, Path::new("x.cpp")).len(), 1);
@@ -233,7 +233,7 @@ fn cache_timing() {
     let files = crate::project_view::ProjectView::open(Path::new(&solution)).unwrap().take_index_files();
 
     let start = Instant::now();
-    let (fresh, stats, save) = refresh(&files, Some(&cache_file), &Progress::default());
+    let (fresh, stats, save) = refresh(&files, Some(&cache_file), &Progress::default(), None);
     let fresh_time = start.elapsed();
     let bytes = save.unwrap();
     let start = Instant::now();
@@ -248,7 +248,7 @@ fn cache_timing() {
     );
 
     let start = Instant::now();
-    let (cached, stats, _) = refresh(&files, Some(&cache_file), &Progress::default());
+    let (cached, stats, _) = refresh(&files, Some(&cache_file), &Progress::default(), None);
     println!("cached: {} symbols in {:?} ({stats:?})", cached.symbol_count(), start.elapsed());
 
     let start = Instant::now();
@@ -276,12 +276,12 @@ fn cache_reuses_unchanged_files() {
     let progress = Progress::default();
 
     // First run: no cache, everything parsed.
-    let (first, stats, save) = refresh(&[a.clone(), b.clone()], Some(&cache_file), &progress);
+    let (first, stats, save) = refresh(&[a.clone(), b.clone()], Some(&cache_file), &progress, None);
     assert_eq!(stats, RefreshStats { from_cache: 0, parsed: 2, removed: 0 });
     cache::write(&cache_file, &save.expect("a new cache to save")).unwrap();
 
     // Nothing changed: everything comes from the cache, nothing to save.
-    let (second, stats, save) = refresh(&[a.clone(), b.clone()], Some(&cache_file), &progress);
+    let (second, stats, save) = refresh(&[a.clone(), b.clone()], Some(&cache_file), &progress, None);
     assert_eq!(stats, RefreshStats { from_cache: 2, parsed: 0, removed: 0 });
     assert!(save.is_none());
     for name in ["alpha", "Beta"] {
@@ -294,14 +294,14 @@ fn cache_reuses_unchanged_files() {
 
     // b.h changes (a different size, so it's detected even within the timer's resolution).
     write_file(dir.path(), "b.h", "struct Beta {};\nstruct Gamma {};");
-    let (third, stats, save) = refresh(&[a.clone(), b.clone()], Some(&cache_file), &progress);
+    let (third, stats, save) = refresh(&[a.clone(), b.clone()], Some(&cache_file), &progress, None);
     assert_eq!(stats, RefreshStats { from_cache: 1, parsed: 1, removed: 0 });
     assert_eq!(find_one(&third, "Gamma"), ["Gamma"]);
     assert_eq!(find_one(&third, "alpha"), ["alpha"]);
     cache::write(&cache_file, &save.unwrap()).unwrap();
 
     // a.cpp leaves the project.
-    let (fourth, stats, _) = refresh(&[b.clone()], Some(&cache_file), &progress);
+    let (fourth, stats, _) = refresh(&[b.clone()], Some(&cache_file), &progress, None);
     assert_eq!(stats, RefreshStats { from_cache: 1, parsed: 0, removed: 1 });
     assert!(find_one(&fourth, "alpha").is_empty());
     assert_eq!(fourth.file_count(), 1);
@@ -344,7 +344,7 @@ fn edits_are_seen_before_and_after_rebuilding_the_lookup() {
     // Re-index stack.cpp a few times; lookups must only ever see the latest text.
     for round in 0..3 {
         let text = format!("void round{round}() {{}}\nint add(int a, int b) {{ return a + b + {round}; }}");
-        index.update_file_text(&mut new_parser(), Path::new("stack.cpp"), &text);
+        index.update_file_text(&mut new_parser(), Path::new("stack.cpp"), &text, None);
         assert_eq!(find_one(&index, &format!("round{round}")), [format!("round{round}")]);
         if round > 0 {
             assert!(find_one(&index, &format!("round{}", round - 1)).is_empty(), "stale symbol from round {}", round - 1);

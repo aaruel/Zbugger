@@ -216,7 +216,7 @@ mod tests {
         let path = dir.path().join("Logo.PNG");
         image::RgbaImage::new(4, 4).save_with_format(&path, image::ImageFormat::Png).unwrap();
 
-        let mut doc = crate::document::Document::open(&path).unwrap();
+        let mut doc = crate::document::Document::open(&path, None).unwrap();
         assert_eq!(doc.image.as_ref().map(ImageView::size), Some((4, 4)));
         assert_eq!(doc.language_name(), "PNG Image");
         assert!(doc.editor.text().is_empty(), "no text is loaded");

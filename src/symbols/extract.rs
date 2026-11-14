@@ -10,6 +10,7 @@ use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 use super::index::{ExtractedFile, FileStamp, SymbolRecord};
 use super::strings::StringTable;
 use super::SymbolKind;
+use crate::unreal::UnrealProfile;
 
 struct Compiled {
     query: Query,
@@ -47,9 +48,13 @@ pub fn new_parser() -> Parser {
 
 /// Every symbol defined or declared in `text`, with names and scopes
 /// interned into `strings`. The records' `file` field is left at 0 for the
-/// index to fill in.
-pub fn extract(parser: &mut Parser, text: &str, strings: &mut StringTable) -> Vec<SymbolRecord> {
-    let masked = mask_export_macros(text);
+/// index to fill in. With an Unreal profile, the engine's macros are hidden
+/// from the parser first; without one, only export macros in class heads are.
+pub fn extract(parser: &mut Parser, text: &str, strings: &mut StringTable, unreal: Option<&UnrealProfile>) -> Vec<SymbolRecord> {
+    let masked = match unreal {
+        Some(profile) => crate::unreal::mask(text, profile).text,
+        None => mask_export_macros(text),
+    };
     let text = masked.as_str();
     let Some(tree) = parser.parse(text, None) else { return Vec::new() };
     let compiled = compiled();
@@ -171,7 +176,7 @@ pub struct ExtractedChunk {
 
 /// Read and index `paths` on all cores. Unreadable files get no symbols.
 /// `progress` is called (from worker threads) after each file.
-pub fn extract_files(paths: &[PathBuf], progress: &(dyn Fn() + Sync)) -> Vec<ExtractedChunk> {
+pub fn extract_files(paths: &[PathBuf], progress: &(dyn Fn() + Sync), unreal: Option<&UnrealProfile>) -> Vec<ExtractedChunk> {
     paths
         .par_chunks(CHUNK)
         .map(|chunk| {
@@ -187,7 +192,7 @@ pub fn extract_files(paths: &[PathBuf], progress: &(dyn Fn() + Sync)) -> Vec<Ext
                         Ok(bytes) => {
                             // Same normalization as the editor, so line/column positions agree.
                             let text = String::from_utf8_lossy(&bytes).replace("\r\n", "\n");
-                            extract(&mut parser, &text, &mut strings)
+                            extract(&mut parser, &text, &mut strings, unreal)
                         }
                         Err(_) => Vec::new(),
                     };
@@ -291,7 +296,7 @@ mod tests {
     fn classes_with_export_macros() {
         let text = "class ENGINE_API AActor : public UObject\n{\n    void Tick(float DeltaTime);\n    int Health;\n};";
         let mut strings = StringTable::default();
-        let records = extract(&mut new_parser(), text, &mut strings);
+        let records = extract(&mut new_parser(), text, &mut strings, None);
         let qualified = |r: &SymbolRecord| match strings.get(r.scope) {
             "" => strings.get(r.name).to_owned(),
             scope => format!("{scope}::{}", strings.get(r.name)),

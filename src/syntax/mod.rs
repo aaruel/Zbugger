@@ -10,6 +10,7 @@ mod theme;
 mod ts_highlight;
 
 use std::path::Path;
+use std::sync::Arc;
 
 use egui::text::{LayoutJob, TextFormat};
 use egui::FontId;
@@ -19,6 +20,8 @@ pub use highlight::{Highlighter, Span};
 pub use theme::Theme;
 pub use ts_highlight::TreeSitterGrammar;
 use ts_highlight::IncrementalHighlighter;
+
+use crate::unreal::{self, MaskKind, UnrealProfile};
 
 /// What a piece of source text is, used to pick its color.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -35,6 +38,12 @@ pub enum TokenKind {
     Constant,
     Namespace,
     Property,
+    /// Unreal reflection and export macros: `UPROPERTY`, `GENERATED_BODY`, `ENGINE_API`.
+    ReflectionMacro,
+    /// A specifier valid on its reflection macro, e.g. `EditAnywhere`.
+    Specifier,
+    /// A specifier the engine doesn't define for that macro.
+    UnknownSpecifier,
 }
 
 /// Lexical rules for one language.
@@ -90,6 +99,13 @@ pub struct SyntaxHighlighter {
     backend: Backend,
     /// Spans per line, for the backends that don't keep their own.
     lines: Vec<Vec<Span>>,
+    /// Unreal macro support: macros are hidden from the parser and colored
+    /// from `overlay` instead.
+    unreal: Option<Arc<UnrealProfile>>,
+    /// The text the parser last saw, with Unreal macros blanked out.
+    masked: String,
+    /// Colors for the hidden Unreal macros, per line, drawn over `lines`.
+    overlay: Vec<Vec<Span>>,
 }
 
 enum Backend {
@@ -101,7 +117,7 @@ enum Backend {
 }
 
 impl SyntaxHighlighter {
-    pub fn new(language: Option<&'static Language>, text: &str) -> Self {
+    pub fn new(language: Option<&'static Language>, text: &str, unreal: Option<Arc<UnrealProfile>>) -> Self {
         let backend = match language {
             None => Backend::Plain,
             Some(lang) => match lang.tree_sitter.as_ref().map(IncrementalHighlighter::new) {
@@ -114,9 +130,16 @@ impl SyntaxHighlighter {
                 None => Backend::Rules(&lang.rules),
             },
         };
-        let mut highlighter = Self { backend, lines: Vec::new() };
+        let mut highlighter = Self { backend, lines: Vec::new(), unreal, masked: String::new(), overlay: Vec::new() };
         highlighter.reset(text);
         highlighter
+    }
+
+    /// Switch Unreal macro support on or off (when a solution opens or closes)
+    /// and re-highlight `text`.
+    pub fn set_unreal(&mut self, unreal: Option<Arc<UnrealProfile>>, text: &str) {
+        self.unreal = unreal;
+        self.reset(text);
     }
 
     /// Highlight `text` from scratch.
@@ -127,16 +150,45 @@ impl SyntaxHighlighter {
                 let mut highlighter = Highlighter::new(rules);
                 self.lines = text.split('\n').map(|line| highlighter.line(line)).collect();
             }
-            Backend::TreeSitter(highlighter) => highlighter.reset(text),
+            Backend::TreeSitter(highlighter) => match &self.unreal {
+                Some(profile) => {
+                    let masked = unreal::mask(text, profile);
+                    highlighter.reset(&masked.text);
+                    self.overlay = overlay_lines(text, &masked.spans);
+                    self.masked = masked.text;
+                }
+                None => {
+                    highlighter.reset(text);
+                    self.overlay.clear();
+                    self.masked.clear();
+                }
+            },
         }
     }
 
     /// Update after `edit` changed the document to `text`.
     pub fn apply_edit(&mut self, text: &str, edit: &InputEdit) {
         match &mut self.backend {
-            Backend::TreeSitter(highlighter) => highlighter.apply_edit(text, edit),
+            Backend::TreeSitter(highlighter) => match &self.unreal {
+                Some(profile) => {
+                    // Masking can change beyond the edit itself (typing the `)`
+                    // that closes a UPROPERTY hides the whole macro), so work
+                    // out the edit the parser sees by comparing masked texts.
+                    let masked = unreal::mask(text, profile);
+                    let masked_edit = ts_highlight::input_edit(&self.masked, &masked.text);
+                    highlighter.apply_edit(&masked.text, &masked_edit);
+                    self.overlay = overlay_lines(text, &masked.spans);
+                    self.masked = masked.text;
+                }
+                None => highlighter.apply_edit(text, edit),
+            },
             _ => self.reset(text),
         }
+    }
+
+    /// Unreal macro colors for line `line`, drawn over [`Self::line_spans`].
+    pub fn line_overlay(&self, line: usize) -> &[Span] {
+        self.overlay.get(line).map_or(&[], Vec::as_slice)
     }
 
     /// Colored spans for line `line`, relative to the line start. Empty means plain text.
@@ -149,19 +201,75 @@ impl SyntaxHighlighter {
     }
 }
 
-/// Build the colored layout for one line of text.
-pub fn line_job(line: &str, spans: &[Span], font: &FontId, theme: &Theme) -> LayoutJob {
+/// Split hidden-macro spans (absolute byte ranges) into per-line spans.
+fn overlay_lines(text: &str, spans: &[(std::ops::Range<usize>, MaskKind)]) -> Vec<Vec<Span>> {
+    let mut lines = vec![Vec::new()];
+    let mut line_start = 0;
+    let mut spans = spans.iter().peekable();
+    for (i, line) in text.split('\n').enumerate() {
+        if i > 0 {
+            lines.push(Vec::new());
+        }
+        let line_end = line_start + line.len();
+        while let Some((range, kind)) = spans.peek() {
+            if range.start > line_end {
+                break;
+            }
+            let (start, end) = (range.start.max(line_start), range.end.min(line_end));
+            if start < end {
+                let kind = match kind {
+                    MaskKind::Macro => TokenKind::ReflectionMacro,
+                    MaskKind::Specifier => TokenKind::Specifier,
+                    MaskKind::UnknownSpecifier => TokenKind::UnknownSpecifier,
+                    MaskKind::MetaKey => TokenKind::Property,
+                    MaskKind::String => TokenKind::String,
+                    MaskKind::Number => TokenKind::Number,
+                };
+                lines.last_mut().expect("never empty").push(Span { range: start - line_start..end - line_start, kind });
+            }
+            if range.end > line_end {
+                break; // continues on the next line
+            }
+            spans.next();
+        }
+        line_start = line_end + 1;
+    }
+    lines
+}
+
+/// Build the colored layout for one line of text: `spans` from the parser,
+/// with `overlay` (hidden Unreal macros) drawn on top.
+pub fn line_job(line: &str, spans: &[Span], overlay: &[Span], font: &FontId, theme: &Theme) -> LayoutJob {
     let mut job = LayoutJob::default();
     job.wrap.max_width = f32::INFINITY;
     let format = |kind| TextFormat::simple(font.clone(), theme.color(kind));
-    if spans.is_empty() {
-        job.append(line, 0.0, format(TokenKind::Plain));
-    }
-    for span in spans {
-        // Spans can briefly lag behind the text while it is being edited.
-        if let Some(text) = line.get(span.range.clone()) {
-            job.append(text, 0.0, format(span.kind));
+    if overlay.is_empty() {
+        if spans.is_empty() {
+            job.append(line, 0.0, format(TokenKind::Plain));
         }
+        for span in spans {
+            // Spans can briefly lag behind the text while it is being edited.
+            if let Some(text) = line.get(span.range.clone()) {
+                job.append(text, 0.0, format(span.kind));
+            }
+        }
+        return job;
+    }
+    // Merge: a kind per byte, then runs of the same kind.
+    let mut kinds = vec![TokenKind::Plain; line.len()];
+    for span in spans.iter().chain(overlay) {
+        let range = span.range.start.min(line.len())..span.range.end.min(line.len());
+        kinds[range].fill(span.kind);
+    }
+    let mut start = 0;
+    while start < line.len() {
+        let kind = kinds[start];
+        let mut end = start + 1;
+        while end < line.len() && (kinds[end] == kind || !line.is_char_boundary(end)) {
+            end += 1;
+        }
+        job.append(&line[start..end], 0.0, format(kind));
+        start = end;
     }
     job
 }

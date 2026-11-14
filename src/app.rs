@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use egui::{pos2, vec2, Align2, FontId, Key, KeyboardShortcut, Modifiers, Rect, RichText, Sense, TextStyle};
@@ -12,6 +13,7 @@ use crate::profiling::ProfileRun;
 use crate::project_view::{is_project_file, ProjectView};
 use crate::symbols::{self, reference_at, Indexer, Phase, RefreshStats, Symbol, SymbolIndex};
 use crate::syntax;
+use crate::unreal::{self, UnrealProfile};
 
 /// Storage key for the project to reopen on startup.
 const PROJECT_STORAGE_KEY: &str = "project";
@@ -59,7 +61,11 @@ pub struct ZbuggerApp {
     /// Set when running the scripted profiling scenario.
     profile_run: Option<ProfileRun>,
     /// A project or solution being loaded in the background.
-    project_loading: Option<(PathBuf, std::sync::mpsc::Receiver<Result<ProjectView, String>>)>,
+    project_loading: Option<(PathBuf, std::sync::mpsc::Receiver<Result<LoadedProject, String>>)>,
+    /// The open Unreal solution's reflection macros and specifiers, if any.
+    unreal: Option<Arc<UnrealProfile>>,
+    /// Whether `unreal` came from its cache rather than the engine's files.
+    unreal_from_cache: bool,
     /// Kept so background work can ask for a repaint.
     ctx: egui::Context,
 }
@@ -68,6 +74,13 @@ pub struct ZbuggerApp {
 /// entries) on another thread, so the UI doesn't stall while it's dropped.
 fn drop_in_background<T: Send + 'static>(value: T) {
     std::thread::spawn(move || drop(value));
+}
+
+/// A project or solution loaded in the background, with its Unreal profile
+/// (and whether that came from the cache) if it's an Unreal solution.
+struct LoadedProject {
+    view: ProjectView,
+    unreal: Option<(Arc<UnrealProfile>, bool)>,
 }
 
 /// Whether go-to-definition and indexing apply to this file.
@@ -135,12 +148,29 @@ impl ZbuggerApp {
         std::thread::Builder::new()
             .name("project-loader".into())
             .spawn(move || {
-                let _ = sender.send(ProjectView::open(&load_path).map_err(|e| e.to_string()));
+                let loaded = ProjectView::open(&load_path).map_err(|e| e.to_string()).map(|view| {
+                    // For Unreal solutions, read (or reuse) the engine's macro profile.
+                    let unreal = view
+                        .unreal_engine()
+                        .and_then(|(engine, modules)| unreal::load_profile(engine, modules))
+                        .map(|(profile, from_cache)| (Arc::new(profile), from_cache));
+                    LoadedProject { view, unreal }
+                });
+                let _ = sender.send(loaded);
                 ctx.request_repaint();
             })
             .expect("can spawn the project loading thread");
         self.project_loading = Some((path.to_path_buf(), receiver));
         self.project_panel_hidden = false;
+    }
+
+    /// Switch Unreal macro support for the open solution, re-highlighting open files.
+    fn set_unreal(&mut self, unreal: Option<(Arc<UnrealProfile>, bool)>) {
+        self.unreal_from_cache = unreal.as_ref().is_some_and(|(_, cached)| *cached);
+        self.unreal = unreal.map(|(profile, _)| profile);
+        for doc in &mut self.documents {
+            doc.editor.set_unreal(self.unreal.clone());
+        }
     }
 
     /// Install a project or solution once it has loaded, replacing what was open.
@@ -154,15 +184,16 @@ impl ZbuggerApp {
         };
         self.project_loading = None;
         match result {
-            Ok(mut view) => {
+            Ok(LoadedProject { mut view, unreal }) => {
                 self.status = None;
+                self.set_unreal(unreal);
                 let files = view.take_index_files();
                 let cache_file = symbols::cache_path(view.path());
                 drop_in_background(self.project.replace(view));
                 self.project_panel_hidden = false;
                 drop_in_background(std::mem::take(&mut self.symbols));
                 self.index_stats = None;
-                self.indexer = Some(Indexer::start(files, cache_file, self.ctx.clone()));
+                self.indexer = Some(Indexer::start(files, cache_file, self.unreal.clone(), self.ctx.clone()));
                 for i in 0..self.documents.len() {
                     self.index_document(i);
                 }
@@ -183,7 +214,7 @@ impl ZbuggerApp {
             self.active = i;
             return;
         }
-        match Document::open(path) {
+        match Document::open(path, self.unreal.clone()) {
             Ok(doc) => {
                 self.status = None;
                 self.documents.push(doc);
@@ -230,7 +261,7 @@ impl ZbuggerApp {
             return;
         }
         let parser = self.symbol_parser.get_or_insert_with(symbols::new_parser);
-        self.symbols.update_file_text(parser, &doc.path, doc.editor.text());
+        self.symbols.update_file_text(parser, &doc.path, doc.editor.text(), self.unreal.as_deref());
     }
 
     /// Merge finished background indexing into the index.
@@ -441,6 +472,7 @@ impl ZbuggerApp {
                     if ui.add_enabled(has_project, egui::Button::new("Close Project or Solution")).clicked() {
                         ui.close_menu();
                         drop_in_background(self.project.take());
+                        self.set_unreal(None);
                         // Drop any background work for it; results arriving later are ignored.
                         self.project_loading = None;
                         self.indexer = None;
@@ -580,6 +612,14 @@ impl ZbuggerApp {
                         format!("{} symbols in {} files", self.symbols.symbol_count(), self.symbols.file_count());
                     if let Some(stats) = self.index_stats {
                         summary.push_str(&format!(" ({} from cache, {} parsed)", stats.from_cache, stats.parsed));
+                    }
+                    if let Some(profile) = &self.unreal {
+                        summary.push_str(&format!(
+                            " · Unreal: {} specifiers, {} modules{}",
+                            profile.specifier_count(),
+                            profile.export_macro_count(),
+                            if self.unreal_from_cache { " (cached)" } else { "" }
+                        ));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(RichText::new(summary).weak());

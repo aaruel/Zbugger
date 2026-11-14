@@ -13,6 +13,7 @@ use super::extract::extract_files;
 use super::index::{FileStamp, SymbolIndex};
 use super::cache;
 use crate::document::path_key;
+use crate::unreal::UnrealProfile;
 
 /// What the indexer is doing, for the status bar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,11 +65,18 @@ pub struct RefreshStats {
 /// modification time or size changed, and drop files no longer listed.
 /// Returns the index, what changed, and the bytes to write back to the cache
 /// if anything did.
-pub fn refresh(files: &[PathBuf], cache_file: Option<&Path>, progress: &Progress) -> (SymbolIndex, RefreshStats, Option<Vec<u8>>) {
+pub fn refresh(
+    files: &[PathBuf],
+    cache_file: Option<&Path>,
+    progress: &Progress,
+    unreal: Option<&UnrealProfile>,
+) -> (SymbolIndex, RefreshStats, Option<Vec<u8>>) {
     progress.set(Phase::LoadingCache, 0);
-    let cached = cache_file.and_then(cache::read);
+    let fingerprint = unreal.map_or(0, |profile| profile.fingerprint);
+    let cached = cache_file.and_then(|file| cache::read(file, fingerprint));
     let had_cache = cached.is_some();
     let mut index = cached.unwrap_or_default();
+    index.unreal_fingerprint = fingerprint;
 
     // Which files changed since they were cached?
     progress.set(Phase::CheckingFiles, files.len());
@@ -90,7 +98,7 @@ pub fn refresh(files: &[PathBuf], cache_file: Option<&Path>, progress: &Progress
     let removed = index.retain_files(&|key| keep.contains(key));
 
     progress.set(Phase::Parsing, stale.len());
-    for chunk in extract_files(&stale, &|| progress.tick()) {
+    for chunk in extract_files(&stale, &|| progress.tick(), unreal) {
         index.merge_bulk(chunk.files, &chunk.strings);
     }
     index.rebuild_postings();
@@ -111,15 +119,21 @@ pub struct Indexer {
 
 impl Indexer {
     /// Start indexing `files`, using and updating the cache at `cache_file`.
-    /// `ctx` is asked to repaint when the index is ready.
-    pub fn start(files: Vec<PathBuf>, cache_file: Option<PathBuf>, ctx: egui::Context) -> Self {
+    /// With an Unreal profile, the engine's macros are understood. `ctx` is
+    /// asked to repaint when the index is ready.
+    pub fn start(
+        files: Vec<PathBuf>,
+        cache_file: Option<PathBuf>,
+        unreal: Option<Arc<UnrealProfile>>,
+        ctx: egui::Context,
+    ) -> Self {
         let (sender, receiver) = mpsc::channel();
         let progress = Arc::new(Progress::default());
         let worker_progress = progress.clone();
         let thread = std::thread::Builder::new()
             .name("symbol-indexer".into())
             .spawn(move || {
-                let (index, stats, save) = refresh(&files, cache_file.as_deref(), &worker_progress);
+                let (index, stats, save) = refresh(&files, cache_file.as_deref(), &worker_progress, unreal.as_deref());
                 // Hand the index over first; writing the cache can happen after.
                 // (The receiver is gone if the project was closed meanwhile; that's fine.)
                 let _ = sender.send((index, stats));

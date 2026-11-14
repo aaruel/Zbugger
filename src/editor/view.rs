@@ -160,7 +160,14 @@ pub fn editor_view(
 /// The laid-out galley for one line. egui caches galleys between frames, so
 /// asking again for an unchanged line is cheap.
 fn line_galley(ui: &Ui, editor: &Editor, line: usize, style: &Style) -> Arc<Galley> {
-    let job = line_job(editor.buffer().line(line), editor.highlighter().line_spans(line), &style.font, style.theme);
+    let highlighter = editor.highlighter();
+    let job = line_job(
+        editor.buffer().line(line),
+        highlighter.line_spans(line),
+        highlighter.line_overlay(line),
+        &style.font,
+        style.theme,
+    );
     ui.fonts(|f| f.layout_job(job))
 }
 

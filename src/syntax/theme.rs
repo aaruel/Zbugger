@@ -16,6 +16,9 @@ pub struct Theme {
     pub constant: Color32,
     pub namespace: Color32,
     pub property: Color32,
+    pub reflection_macro: Color32,
+    pub specifier: Color32,
+    pub unknown_specifier: Color32,
 }
 
 impl Theme {
@@ -32,6 +35,9 @@ impl Theme {
         constant: Color32::from_rgb(0x4F, 0xC1, 0xFF),
         namespace: Color32::from_rgb(0x4E, 0xC9, 0xB0),
         property: Color32::from_rgb(0x9C, 0xDC, 0xFE),
+        reflection_macro: Color32::from_rgb(0xB7, 0x8C, 0xF7),
+        specifier: Color32::from_rgb(0xD7, 0xBA, 0x7D),
+        unknown_specifier: Color32::from_rgb(0xF4, 0x47, 0x47),
     };
 
     pub const LIGHT: Theme = Theme {
@@ -47,6 +53,9 @@ impl Theme {
         constant: Color32::from_rgb(0x00, 0x70, 0xC1),
         namespace: Color32::from_rgb(0x26, 0x7F, 0x99),
         property: Color32::from_rgb(0x00, 0x10, 0x80),
+        reflection_macro: Color32::from_rgb(0x7A, 0x3E, 0x9D),
+        specifier: Color32::from_rgb(0x8B, 0x5A, 0x00),
+        unknown_specifier: Color32::from_rgb(0xCD, 0x31, 0x31),
     };
 
     pub fn for_visuals(visuals: &egui::Visuals) -> &'static Theme {
@@ -71,6 +80,9 @@ impl Theme {
             TokenKind::Constant => self.constant,
             TokenKind::Namespace => self.namespace,
             TokenKind::Property => self.property,
+            TokenKind::ReflectionMacro => self.reflection_macro,
+            TokenKind::Specifier => self.specifier,
+            TokenKind::UnknownSpecifier => self.unknown_specifier,
         }
     }
 }

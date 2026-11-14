@@ -22,9 +22,10 @@ const MAGIC: &[u8; 4] = b"ZBIX";
 /// Bump when the layout or the extractor's behaviour changes.
 const FORMAT_VERSION: u64 = 1;
 
-/// Changes whenever the format or the symbol query changes, invalidating old caches.
-fn version() -> u64 {
-    fnv1a(QUERY_SOURCE.as_bytes()) ^ FORMAT_VERSION
+/// Changes whenever the format, the symbol query or the Unreal profile
+/// (which changes what gets indexed) changes, invalidating old caches.
+fn version(unreal_fingerprint: u64) -> u64 {
+    fnv1a(QUERY_SOURCE.as_bytes()) ^ FORMAT_VERSION ^ unreal_fingerprint.rotate_left(17)
 }
 
 /// A small, stable hash (unlike std's, which may change between Rust versions).
@@ -49,7 +50,7 @@ pub fn serialize(index: &SymbolIndex) -> Vec<u8> {
     let mut out = Vec::with_capacity(64 + bytes.len() + spans.len() * 8 + files.len() * 28 + records * 18);
 
     out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&version().to_le_bytes());
+    out.extend_from_slice(&version(index.unreal_fingerprint).to_le_bytes());
     out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
     out.extend_from_slice(bytes.as_bytes());
     out.extend_from_slice(&(spans.len() as u32).to_le_bytes());
@@ -78,11 +79,18 @@ pub fn serialize(index: &SymbolIndex) -> Vec<u8> {
     out
 }
 
-/// Parse a cache; `None` if it's from another version or damaged.
+/// Parse a cache built without an Unreal profile.
+#[cfg(test)]
 pub fn deserialize(data: &[u8]) -> Option<SymbolIndex> {
+    deserialize_for(data, 0)
+}
+
+/// Parse a cache; `None` if it's from another version, was built with a
+/// different Unreal profile, or is damaged.
+pub fn deserialize_for(data: &[u8], unreal_fingerprint: u64) -> Option<SymbolIndex> {
     zone!("load symbol cache");
     let mut r = Reader { data, pos: 0 };
-    if r.take(4)? != MAGIC || r.u64()? != version() {
+    if r.take(4)? != MAGIC || r.u64()? != version(unreal_fingerprint) {
         return None;
     }
     let byte_len = usize::try_from(r.u64()?).ok()?;
@@ -123,11 +131,13 @@ pub fn deserialize(data: &[u8]) -> Option<SymbolIndex> {
     if r.pos != data.len() {
         return None; // trailing junk: written by something else
     }
-    Some(SymbolIndex::from_parts(strings, files))
+    let mut index = SymbolIndex::from_parts(strings, files);
+    index.unreal_fingerprint = unreal_fingerprint;
+    Some(index)
 }
 
-pub fn read(path: &Path) -> Option<SymbolIndex> {
-    deserialize(&std::fs::read(path).ok()?)
+pub fn read(path: &Path, unreal_fingerprint: u64) -> Option<SymbolIndex> {
+    deserialize_for(&std::fs::read(path).ok()?, unreal_fingerprint)
 }
 
 /// Write via a temporary file and rename, so quitting mid-write can't leave

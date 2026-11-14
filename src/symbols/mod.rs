@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 pub use cache::cache_path;
 pub use extract::new_parser;
-pub use index::SymbolIndex;
+pub use index::{FileStamp, SymbolIndex};
 pub use indexer::{Indexer, Phase, RefreshStats};
 
 /// Stored as one byte in the index and its cache; the order is part of the
@@ -198,7 +198,7 @@ fn scope_matches(scope: &str, qualifier: &str) -> bool {
 /// Index `files` from scratch (no cache) and count the symbols, for timing tests elsewhere.
 #[cfg(test)]
 pub fn index_files_for_test(files: &[PathBuf]) -> usize {
-    indexer::refresh(files, None, &indexer::Progress::default()).0.symbol_count()
+    indexer::refresh(files, None, &indexer::Progress::default(), None).0.symbol_count()
 }
 
 #[cfg(test)]

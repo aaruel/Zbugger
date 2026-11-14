@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::editor::Editor;
 use crate::image_view::{is_image, ImageView};
+use crate::unreal::UnrealProfile;
 use crate::syntax::{self, Language};
 
 /// A file open in a tab: source text, or an image.
@@ -20,7 +22,9 @@ pub struct Document {
 }
 
 impl Document {
-    pub fn open(path: &Path) -> std::io::Result<Self> {
+    /// Open `path`. With an Unreal profile, C++ highlighting understands the
+    /// engine's reflection macros.
+    pub fn open(path: &Path, unreal: Option<Arc<UnrealProfile>>) -> std::io::Result<Self> {
         if is_image(path) {
             return Ok(Self {
                 path: path.to_path_buf(),
@@ -37,7 +41,8 @@ impl Document {
         let text = if crlf { text.replace("\r\n", "\n") } else { text.into_owned() };
 
         let language = syntax::detect(path);
-        Ok(Self { path: path.to_path_buf(), language, editor: Editor::new(text, language), image: None, crlf })
+        let editor = Editor::with_unreal(text, language, unreal);
+        Ok(Self { path: path.to_path_buf(), language, editor, image: None, crlf })
     }
 
     pub fn save(&mut self) -> std::io::Result<()> {

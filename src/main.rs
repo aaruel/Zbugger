@@ -14,6 +14,7 @@ mod project;
 mod project_view;
 mod symbols;
 mod syntax;
+mod unreal;
 
 /// mimalloc serves Rust's allocations: much faster than the Windows heap for
 /// the many small, multi-threaded allocations of indexing, and unaffected by

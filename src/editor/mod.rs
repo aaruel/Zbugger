@@ -6,11 +6,13 @@ mod buffer;
 mod view;
 
 use std::ops::Range;
+use std::sync::Arc;
 
 pub use buffer::TextBuffer;
 pub use view::editor_view;
 
 use crate::syntax::{Language, SyntaxHighlighter};
+use crate::unreal::UnrealProfile;
 
 /// A selection from `anchor` (where it started) to `head` (where the caret is).
 /// Both are byte offsets; an empty selection is just a caret.
@@ -89,8 +91,14 @@ pub struct Editor {
 
 impl Editor {
     pub fn new(text: String, language: Option<&'static Language>) -> Self {
+        Self::with_unreal(text, language, None)
+    }
+
+    /// An editor whose highlighting understands the given Unreal engine's
+    /// reflection macros.
+    pub fn with_unreal(text: String, language: Option<&'static Language>, unreal: Option<Arc<UnrealProfile>>) -> Self {
         let indent_unit = detect_indent(&text);
-        let highlighter = SyntaxHighlighter::new(language, &text);
+        let highlighter = SyntaxHighlighter::new(language, &text, unreal);
         Self {
             buffer: TextBuffer::new(text),
             highlighter,
@@ -111,6 +119,11 @@ impl Editor {
 
     pub fn buffer(&self) -> &TextBuffer {
         &self.buffer
+    }
+
+    /// Switch Unreal macro support on or off and re-highlight.
+    pub fn set_unreal(&mut self, unreal: Option<Arc<UnrealProfile>>) {
+        self.highlighter.set_unreal(unreal, self.buffer.text());
     }
 
     pub fn text(&self) -> &str {
