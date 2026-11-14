@@ -12,6 +12,8 @@ mod navigation;
 mod preferences;
 mod project;
 mod project_view;
+mod search;
+mod search_panel;
 mod symbols;
 mod syntax;
 mod unreal;

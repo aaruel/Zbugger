@@ -11,6 +11,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use egui::{pos2, vec2, Color32, RichText, Sense, Shape, Stroke, TextStyle, TextWrapMode, Ui, WidgetText};
 use rayon::prelude::*;
@@ -59,6 +60,11 @@ pub struct ProjectView {
     index_files: Vec<PathBuf>,
     /// For Unreal solutions: the engine directory and the solution's module names.
     unreal_engine: Option<(PathBuf, Vec<String>)>,
+    /// Every file Find in Files searches: all of the solution's files except
+    /// images and unresolvable paths, deduplicated.
+    search_files: Arc<Vec<PathBuf>>,
+    /// [`path_key`] of every file in the solution.
+    file_keys: HashSet<PathBuf>,
     /// The tree, with the invisible root at index 0.
     nodes: Vec<Node>,
     expanded: HashSet<usize>,
@@ -120,6 +126,16 @@ impl ProjectView {
 
     /// For an Unreal solution, the engine directory and the module names
     /// (for `ENGINE_API`-style export macros).
+    /// Whether `path` is one of the solution's files.
+    pub fn contains_file(&self, path: &Path) -> bool {
+        self.file_keys.contains(&path_key(path))
+    }
+
+    /// The files Find in Files searches (shared, cheap to clone).
+    pub fn search_files(&self) -> Arc<Vec<PathBuf>> {
+        self.search_files.clone()
+    }
+
     pub fn unreal_engine(&self) -> Option<(&Path, &[String])> {
         self.unreal_engine.as_ref().map(|(dir, modules)| (dir.as_path(), modules.as_slice()))
     }
@@ -368,6 +384,7 @@ struct TreeBuilder {
     warnings: Vec<String>,
     seen_files: HashSet<PathBuf>,
     index_files: Vec<PathBuf>,
+    search_files: Vec<PathBuf>,
     /// The engine's `ObjectMacros.h`, if the solution includes the engine.
     object_macros: Option<PathBuf>,
     /// Module names from `<Module>.Build.cs` files.
@@ -393,8 +410,13 @@ impl TreeBuilder {
             self.modules.push(module);
         }
         let key = path_key(path);
-        if problem.is_none() && self.seen_files.insert(key.clone()) && is_cpp(path) {
-            self.index_files.push(path.to_path_buf());
+        if problem.is_none() && self.seen_files.insert(key.clone()) {
+            if !crate::image_view::is_image(path) {
+                self.search_files.push(path.to_path_buf());
+            }
+            if is_cpp(path) {
+                self.index_files.push(path.to_path_buf());
+            }
         }
         let entry = FileEntry { path: path.to_path_buf(), key, exists: false, problem, search: String::new() };
         self.add(parent, file_name(path), NodeKind::File(entry));
@@ -498,6 +520,8 @@ impl TreeBuilder {
             title,
             warnings: self.warnings,
             index_files: self.index_files,
+            search_files: Arc::new(self.search_files),
+            file_keys: self.seen_files,
             unreal_engine: self
                 .object_macros
                 .as_deref()

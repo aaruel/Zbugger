@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -5,8 +6,10 @@ use std::time::Duration;
 use egui::{pos2, vec2, Align2, FontId, Key, KeyboardShortcut, Modifiers, Rect, RichText, Sense, TextStyle};
 
 use crate::document::{path_key, Document};
-use crate::editor::editor_view;
+use crate::editor::{editor_view, Selection};
 use crate::find::FindBar;
+use crate::search::{Search, SearchQuery};
+use crate::search_panel::SearchPanel;
 use crate::preferences::{self, Preferences};
 use crate::navigation::{DefinitionPicker, History, Location, PickerResult};
 use crate::profiling::ProfileRun;
@@ -25,6 +28,8 @@ const PROJECT_PANEL_SHORTCUT: KeyboardShortcut =
     KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::E);
 const SAVE_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::S);
 const FIND_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::F);
+const FIND_IN_FILES_SHORTCUT: KeyboardShortcut =
+    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::F);
 const FIND_NEXT_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::F3);
 const FIND_PREVIOUS_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::SHIFT, Key::F3);
 const CLOSE_TAB_SHORTCUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::W);
@@ -58,6 +63,8 @@ pub struct ZbuggerApp {
     history: History,
     /// The Ctrl+F find bar.
     find: FindBar,
+    /// The Ctrl+Shift+F Find in Files panel.
+    search_panel: SearchPanel,
     /// Set when running the scripted profiling scenario.
     profile_run: Option<ProfileRun>,
     /// A project or solution being loaded in the background.
@@ -411,7 +418,10 @@ impl ZbuggerApp {
         let pressed = |shortcut| ctx.input_mut(|i| i.consume_shortcut(shortcut));
         let open = pressed(&OPEN_SHORTCUT);
         let save = pressed(&SAVE_SHORTCUT);
-        if pressed(&FIND_SHORTCUT) {
+        // Check Ctrl+Shift+F first: Ctrl+F alone could also match it.
+        if pressed(&FIND_IN_FILES_SHORTCUT) {
+            self.open_search_panel();
+        } else if pressed(&FIND_SHORTCUT) {
             self.open_find();
         }
         // Check Shift+F3 first: F3 alone would also match it.
@@ -507,6 +517,12 @@ impl ZbuggerApp {
                 });
                 ui.menu_button("Edit", |ui| {
                     let has_doc = !self.documents.is_empty();
+                    let find_in_files = egui::Button::new("Find in Files...")
+                        .shortcut_text(ctx.format_shortcut(&FIND_IN_FILES_SHORTCUT));
+                    if ui.add(find_in_files).clicked() {
+                        ui.close_menu();
+                        self.open_search_panel();
+                    }
                     let find = egui::Button::new("Find...").shortcut_text(ctx.format_shortcut(&FIND_SHORTCUT));
                     if ui.add_enabled(has_doc, find).clicked() {
                         ui.close_menu();
@@ -637,6 +653,69 @@ impl ZbuggerApp {
                 }
             });
         });
+    }
+
+    /// Open Find in Files, searching for the selection if there is one.
+    fn open_search_panel(&mut self) {
+        let selection = self.active_doc().filter(|d| d.image.is_none()).map(|d| d.editor.selected_text().to_owned());
+        self.search_panel.open(selection.as_deref());
+    }
+
+    /// The Find in Files panel, along the bottom of the window.
+    fn search_panel_ui(&mut self, ctx: &egui::Context) {
+        if !self.search_panel.open {
+            return;
+        }
+        let documents = &self.documents;
+        let project = &self.project;
+        let mut start = |query: SearchQuery| {
+            // Open tabs are searched from memory, so unsaved edits count.
+            let open: HashMap<PathBuf, String> = documents
+                .iter()
+                .filter(|d| d.image.is_none())
+                .map(|d| (path_key(&d.path), d.editor.text().to_owned()))
+                .collect();
+            // The solution's files, plus open tabs that aren't part of it.
+            let outside: Vec<PathBuf> = documents
+                .iter()
+                .filter(|d| d.image.is_none() && !project.as_ref().is_some_and(|p| p.contains_file(&d.path)))
+                .map(|d| d.path.clone())
+                .collect();
+            let files = match project {
+                Some(view) if outside.is_empty() => view.search_files(),
+                Some(view) => Arc::new(view.search_files().iter().cloned().chain(outside).collect()),
+                None => Arc::new(outside),
+            };
+            Search::start(query, files, open, ctx.clone())
+        };
+        let panel = &mut self.search_panel;
+        let jump = egui::TopBottomPanel::bottom("find_in_files")
+            .resizable(true)
+            .default_height(260.0)
+            .height_range(120.0..=900.0)
+            .show(ctx, |ui| panel.ui(ui, &mut start))
+            .inner;
+        if let Some(jump) = jump {
+            self.jump_to_match(Location { path: jump.path, line: jump.line, column: jump.column }, jump.len);
+        }
+    }
+
+    /// Open a search result with the match selected, remembering where we came from.
+    fn jump_to_match(&mut self, location: Location, len: usize) {
+        if let Some(here) = self.current_location() {
+            self.history.push(here);
+        }
+        self.show_location(&location);
+        if let Some(doc) = self.documents.get_mut(self.active) {
+            if path_key(&doc.path) == path_key(&location.path) {
+                let head = doc.editor.selection.head;
+                let end = (head + len).min(doc.editor.text().len());
+                if doc.editor.text().is_char_boundary(end) {
+                    doc.editor.select(Selection { anchor: head, head: end });
+                    doc.editor.scroll_center = true;
+                }
+            }
+        }
     }
 
     fn open_find(&mut self) {
@@ -854,6 +933,8 @@ impl ZbuggerApp {
         // left, so the tab bar added after it only spans the editor.
         self.menu_bar(ctx);
         self.status_bar(ctx);
+        // Above the status bar, full width.
+        self.search_panel_ui(ctx);
         self.project_panel(ctx);
         self.tab_bar(ctx);
         self.text_view(ctx);
