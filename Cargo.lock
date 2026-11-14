@@ -4409,6 +4409,7 @@ dependencies = [
  "rfd",
  "roxmltree",
  "serde",
+ "serde_json",
  "tempfile",
  "tracy-client",
  "tree-sitter",

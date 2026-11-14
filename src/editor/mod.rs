@@ -9,7 +9,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 pub use buffer::TextBuffer;
-pub use view::editor_view;
+pub use view::{editor_view, EXEC_COLOR};
 
 use crate::syntax::{Language, SyntaxHighlighter};
 use crate::unreal::UnrealProfile;
@@ -87,6 +87,21 @@ pub struct Editor {
     /// Widest line laid out so far, in points (lines with tabs can be wider
     /// than their length suggests).
     pub widest_line: f32,
+    /// Breakpoints, sorted by line. They move with the text as it's edited.
+    breakpoints: Vec<Breakpoint>,
+    /// Changes whenever the breakpoint lines change, so the debugger can be told.
+    breakpoints_version: u64,
+    /// The line the debugger is stopped at (the yellow arrow), in this file.
+    exec_line: Option<usize>,
+}
+
+/// A breakpoint on a line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Breakpoint {
+    /// Zero-based.
+    pub line: usize,
+    /// Whether the debugger placed it; `None` when no debugger has seen it.
+    pub verified: Option<bool>,
 }
 
 impl Editor {
@@ -114,7 +129,72 @@ impl Editor {
             scroll_center: false,
             request_focus: true,
             widest_line: 0.0,
+            breakpoints: Vec::new(),
+            breakpoints_version: 0,
+            exec_line: None,
         }
+    }
+
+    pub fn breakpoints(&self) -> &[Breakpoint] {
+        &self.breakpoints
+    }
+
+    pub fn breakpoint_lines(&self) -> Vec<usize> {
+        self.breakpoints.iter().map(|b| b.line).collect()
+    }
+
+    pub fn breakpoint_at(&self, line: usize) -> Option<&Breakpoint> {
+        self.breakpoints.binary_search_by_key(&line, |b| b.line).ok().map(|i| &self.breakpoints[i])
+    }
+
+    /// Changes whenever the breakpoint lines change.
+    pub fn breakpoints_version(&self) -> u64 {
+        self.breakpoints_version
+    }
+
+    /// Add a breakpoint on `line`, or remove the one there.
+    pub fn toggle_breakpoint(&mut self, line: usize) {
+        let line = line.min(self.buffer.line_count() - 1);
+        match self.breakpoints.binary_search_by_key(&line, |b| b.line) {
+            Ok(i) => {
+                self.breakpoints.remove(i);
+            }
+            Err(i) => self.breakpoints.insert(i, Breakpoint { line, verified: None }),
+        }
+        self.breakpoints_version += 1;
+    }
+
+    /// Replace all breakpoints (when a file is reopened).
+    pub fn set_breakpoint_lines(&mut self, lines: &[usize]) {
+        let last = self.buffer.line_count() - 1;
+        let mut lines: Vec<usize> = lines.iter().map(|&l| l.min(last)).collect();
+        lines.sort_unstable();
+        lines.dedup();
+        self.breakpoints = lines.into_iter().map(|line| Breakpoint { line, verified: None }).collect();
+        self.breakpoints_version += 1;
+    }
+
+    /// Record whether the debugger placed the breakpoint on `line`.
+    pub fn set_breakpoint_verified(&mut self, line: usize, verified: Option<bool>) {
+        if let Ok(i) = self.breakpoints.binary_search_by_key(&line, |b| b.line) {
+            self.breakpoints[i].verified = verified;
+        }
+    }
+
+    /// Forget what the debugger said about each breakpoint (it has ended).
+    pub fn clear_breakpoint_status(&mut self) {
+        for breakpoint in &mut self.breakpoints {
+            breakpoint.verified = None;
+        }
+    }
+
+    pub fn exec_line(&self) -> Option<usize> {
+        self.exec_line
+    }
+
+    /// Show (or hide) where the debugger is stopped.
+    pub fn set_exec_line(&mut self, line: Option<usize>) {
+        self.exec_line = line.map(|l| l.min(self.buffer.line_count() - 1));
     }
 
     pub fn buffer(&self) -> &TextBuffer {
@@ -273,8 +353,59 @@ impl Editor {
         let start = range.start;
         let edit = self.buffer.replace(range, text);
         self.highlighter.apply_edit(self.buffer.text(), &edit);
+        self.move_markers(&edit);
         Change { start, removed, inserted: text.to_owned() }
     }
+}
+
+impl Editor {
+    /// Keep breakpoints and the debugger arrow on their lines of text as
+    /// lines are inserted and deleted above or within them.
+    fn move_markers(&mut self, edit: &tree_sitter::InputEdit) {
+        if self.breakpoints.is_empty() && self.exec_line.is_none() {
+            return;
+        }
+        let before: Vec<usize> = self.breakpoint_lines();
+        let mut moved: Vec<Breakpoint> = self
+            .breakpoints
+            .iter()
+            .filter_map(|b| moved_line(b.line, edit).map(|line| Breakpoint { line, ..*b }))
+            .collect();
+        moved.dedup_by_key(|b| b.line);
+        self.breakpoints = moved;
+        if self.breakpoint_lines() != before {
+            self.breakpoints_version += 1;
+        }
+        self.exec_line = self.exec_line.and_then(|line| moved_line(line, edit));
+    }
+}
+
+/// Where the text of `line` is after `edit`, or `None` if it was deleted
+/// (or merged into the line above).
+fn moved_line(line: usize, edit: &tree_sitter::InputEdit) -> Option<usize> {
+    let start = edit.start_position;
+    let old_end = edit.old_end_position;
+    let new_end = edit.new_end_position.row;
+    if line < start.row {
+        return Some(line);
+    }
+    // After the edit, or right at its end (a deletion that ended at the
+    // start of this line leaves this line's text whole).
+    if line > old_end.row || (line == old_end.row && old_end.column == 0 && old_end.row > start.row) {
+        return Some(line + new_end - old_end.row);
+    }
+    if line == start.row {
+        // Typing Enter at the start of a line pushes its text down.
+        if start.column == 0 && edit.start_byte == edit.old_end_byte {
+            return Some(new_end);
+        }
+        // Whole lines deleted, starting with this one.
+        if start.column == 0 && old_end.column == 0 && old_end.row > start.row {
+            return None;
+        }
+        return Some(line);
+    }
+    None // inside the deleted range
 }
 
 /// Whether `applied` continues the run of typing or deleting in `last`.
@@ -466,6 +597,72 @@ mod tests {
         assert_eq!(word_at(text, text.len()), 21..22);
         assert_eq!(prev_char("é", 2), 0);
         assert_eq!(next_char("é", 0), 2);
+    }
+
+    #[test]
+    fn breakpoints_follow_their_lines() {
+        let mut ed = editor("a\nb\nc\nd\n");
+        ed.toggle_breakpoint(1); // b
+        ed.toggle_breakpoint(3); // d
+        let lines = |ed: &Editor| ed.breakpoint_lines();
+
+        // A line inserted above moves both down.
+        ed.select(Selection::caret(0));
+        ed.insert("x\n", EditKind::Other);
+        assert_eq!(lines(&ed), [2, 4]);
+        // Enter at the start of the line with a breakpoint pushes it down.
+        let b = ed.buffer().line_range(2).start;
+        ed.select(Selection::caret(b));
+        ed.insert("\n", EditKind::Other);
+        assert_eq!(lines(&ed), [3, 5]);
+        // Typing within the line keeps it there.
+        ed.select(Selection::caret(ed.buffer().line_range(3).end));
+        ed.insert(" more\nlines", EditKind::Other);
+        assert_eq!(lines(&ed), [3, 6]);
+        // Undo moves it back.
+        ed.undo();
+        assert_eq!(lines(&ed), [3, 5]);
+        // Deleting whole lines including the breakpoint's removes it, and
+        // moves the later one up.
+        let range = ed.buffer().line_range(3).start..ed.buffer().line_range(5).start;
+        ed.delete(range, EditKind::Other);
+        assert_eq!(lines(&ed), [3]);
+        assert_eq!(ed.buffer().line(3), "d");
+        // Joining the line onto the one above keeps its breakpoint, on the joined line.
+        ed.select(Selection::caret(ed.buffer().line_range(2).start));
+        ed.insert("q", EditKind::Other);
+        let join = ed.buffer().line_range(2).end..ed.buffer().line_range(3).start;
+        ed.delete(join, EditKind::Other);
+        assert_eq!(lines(&ed), [2]);
+        assert_eq!(ed.buffer().line(2), "qd");
+        // Deleting part of a line with a breakpoint and the lines after keeps it.
+        ed.toggle_breakpoint(0);
+        let range = ed.buffer().line_range(0).start + 1..ed.buffer().line_range(2).start + 1;
+        ed.delete(range, EditKind::Other);
+        assert_eq!(ed.buffer().line(0), "xd");
+        assert_eq!(lines(&ed), [0]);
+    }
+
+    #[test]
+    fn breakpoint_toggle_and_version() {
+        let mut ed = editor("a\nb\n");
+        let v0 = ed.breakpoints_version();
+        ed.toggle_breakpoint(1);
+        assert!(ed.breakpoint_at(1).is_some());
+        assert_ne!(ed.breakpoints_version(), v0);
+        ed.toggle_breakpoint(1);
+        assert!(ed.breakpoint_at(1).is_none());
+        // Edits that don't move breakpoints leave the version alone.
+        ed.toggle_breakpoint(0);
+        let v1 = ed.breakpoints_version();
+        ed.select(Selection::caret(1));
+        ed.insert("bc", EditKind::Typing);
+        assert_eq!(ed.breakpoints_version(), v1);
+        ed.set_exec_line(Some(1));
+        ed.select(Selection::caret(0));
+        ed.insert("\n", EditKind::Other);
+        assert_eq!(ed.exec_line(), Some(2));
+        assert_eq!(ed.breakpoint_lines(), [1]);
     }
 
     #[test]

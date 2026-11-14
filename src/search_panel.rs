@@ -1,5 +1,5 @@
-//! The Find in Files panel (Ctrl+Shift+F): a query box with options, and the
-//! results grouped by file. Only visible result rows are drawn.
+//! The Find in Files tab (Ctrl+Shift+F) of the bottom panel: a query box with
+//! options, and the results grouped by file. Only visible result rows are drawn.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -31,7 +31,6 @@ enum Row {
 
 #[derive(Default)]
 pub struct SearchPanel {
-    pub open: bool,
     query: SearchQuery,
     search: Option<Search>,
     results: Vec<FileMatches>,
@@ -64,13 +63,12 @@ impl SearchPanel {
                 self.changed_at = Some(Instant::now() - TYPING_PAUSE); // search right away
             }
         }
-        self.open = true;
         self.focus_query = true;
     }
 
-    fn close(&mut self) {
-        self.open = false;
-        self.search = None; // stops a running search
+    /// Stop a running search (when the panel is closed).
+    pub fn stop(&mut self) {
+        self.search = None;
     }
 
     /// Start a search for the current query with `start`, replacing any running one.
@@ -121,7 +119,6 @@ impl SearchPanel {
         let mut search_now = false;
 
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Find in Files").strong());
             let before = self.query.clone();
             let response = ui.add(
                 egui::TextEdit::singleline(&mut self.query.text)
@@ -143,17 +140,9 @@ impl SearchPanel {
                 self.changed_at = Some(Instant::now());
             }
 
-            // Status on the right, close button at the far right.
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("×").on_hover_text("Close").clicked() {
-                    self.close();
-                }
-                self.status_label(ui);
-            });
+            ui.add_space(8.0);
+            self.status_label(ui);
         });
-        if !self.open {
-            return None;
-        }
 
         // Search after a pause in typing, or right away on Enter.
         if let Some(changed) = self.changed_at {

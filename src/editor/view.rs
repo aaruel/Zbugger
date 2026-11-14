@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use egui::text::CCursor;
 use egui::{
-    pos2, vec2, Align2, CursorIcon, Event, EventFilter, FontId, Galley, ImeEvent, Key, Modifiers,
+    pos2, vec2, Align2, Color32, CursorIcon, Event, EventFilter, FontId, Galley, ImeEvent, Key, Modifiers,
     PointerButton, Pos2, Rect, ScrollArea, Sense, Stroke, Ui, UiBuilder,
 };
 
@@ -18,6 +18,13 @@ use crate::syntax::{line_job, Theme};
 
 /// Space between the gutter and the text.
 const TEXT_MARGIN: f32 = 4.0;
+
+/// Breakpoint dot and its line tint.
+pub const BREAKPOINT_COLOR: Color32 = Color32::from_rgb(0xE5, 0x39, 0x35);
+const BREAKPOINT_LINE: Color32 = Color32::from_rgba_premultiplied(50, 13, 12, 56);
+/// The debugger's current-line arrow and its line tint.
+pub const EXEC_COLOR: Color32 = Color32::from_rgb(0xFF, 0xD2, 0x1F);
+const EXEC_LINE: Color32 = Color32::from_rgba_premultiplied(51, 42, 6, 51);
 
 /// Font measurements and colors shared by the helpers below.
 struct Style<'a> {
@@ -54,15 +61,17 @@ pub fn editor_view(
     };
     let id = ui.make_persistent_id(id_salt);
 
-    // Split the panel: fixed gutter on the left, scrolling text on the right.
+    // Split the panel: fixed gutter on the left (breakpoint margin, then line
+    // numbers), scrolling text on the right.
     let full = ui.available_rect_before_wrap();
     ui.allocate_rect(full, Sense::hover());
-    let gutter_width = if prefs.show_line_numbers {
+    let numbers_width = if prefs.show_line_numbers {
         let digits = editor.buffer().line_count().to_string().len().max(3);
-        style.char_width * (digits as f32 + 2.0)
+        style.char_width * (digits as f32 + 1.0)
     } else {
         0.0
     };
+    let gutter_width = marker_width(&style) + numbers_width;
     let gutter_rect = Rect::from_min_size(full.min, vec2(gutter_width, full.height()));
     let text_rect = Rect::from_min_max(pos2(gutter_rect.max.x, full.min.y), full.max);
 
@@ -149,10 +158,13 @@ pub fn editor_view(
             }
         });
 
-    if gutter_width > 0.0 {
-        paint_gutter(ui, editor, &style, gutter_rect, output.inner_rect, output.state.offset.y);
-    }
+    gutter(ui, editor, &style, id.with("gutter"), gutter_rect, output.inner_rect, output.state.offset.y, prefs.show_line_numbers);
     out
+}
+
+/// Width of the breakpoint margin.
+fn marker_width(style: &Style) -> f32 {
+    (style.row_height + 4.0).max(16.0)
 }
 
 // ---- Layout helpers ----------------------------------------------------------
@@ -245,6 +257,12 @@ fn paint_lines(
         let range = editor.buffer().line_range(line);
         let text = editor.buffer().line(line);
 
+        if editor.breakpoint_at(line).is_some() {
+            painter.rect_filled(row(visible.left(), visible.right()), 0.0, BREAKPOINT_LINE);
+        }
+        if editor.exec_line() == Some(line) {
+            painter.rect_filled(row(visible.left(), visible.right()), 0.0, EXEC_LINE);
+        }
         if focused && selection.is_empty() && line == head_line {
             painter.rect_filled(row(visible.left(), visible.right()), 0.0, current_line_color);
         }
@@ -287,26 +305,94 @@ fn paint_lines(
     }
 }
 
-fn paint_gutter(ui: &Ui, editor: &Editor, style: &Style, gutter: Rect, viewport: Rect, scroll_y: f32) {
+/// The gutter: breakpoint dots, the debugger's arrow and line numbers.
+/// Clicking it toggles a breakpoint on that line.
+#[allow(clippy::too_many_arguments)]
+fn gutter(ui: &Ui, editor: &mut Editor, style: &Style, id: egui::Id, gutter: Rect, viewport: Rect, scroll_y: f32, numbers: bool) {
+    let line_count = editor.buffer().line_count();
+    let line_at = |y: f32| ((y - viewport.top() + scroll_y) / style.row_height).floor();
+    let area = Rect::from_x_y_ranges(gutter.x_range(), viewport.y_range());
+    let response = ui.interact(area, id, Sense::click());
+    let hovered_line = response
+        .hover_pos()
+        .map(|pos| line_at(pos.y))
+        .filter(|&line| line >= 0.0 && (line as usize) < line_count)
+        .map(|line| line as usize);
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    if response.clicked() {
+        if let Some(line) = hovered_line {
+            editor.toggle_breakpoint(line);
+        }
+    }
+
     let painter = ui.painter_at(gutter);
     let weak = ui.visuals().weak_text_color();
     let strong = ui.visuals().strong_text_color();
     let head_line = editor.buffer().line_of(editor.selection.head);
-    let line_count = editor.buffer().line_count();
+    let marker_x = gutter.left() + marker_width(style) * 0.5;
+    let radius = (style.row_height * 0.33).min(7.0);
 
     let first = (scroll_y / style.row_height).floor().max(0.0) as usize;
     let last = (((scroll_y + viewport.height()) / style.row_height).ceil() as usize).min(line_count - 1);
     for line in first..=last {
         let y = viewport.top() + line as f32 * style.row_height - scroll_y;
-        let color = if line == head_line { strong } else { weak };
-        painter.text(
-            pos2(gutter.right() - style.char_width, y),
-            Align2::RIGHT_TOP,
-            (line + 1).to_string(),
-            style.font.clone(),
-            color,
-        );
+        let center = pos2(marker_x, y + style.row_height * 0.5);
+        match editor.breakpoint_at(line) {
+            // Placed by the debugger, or not debugging: a solid dot.
+            Some(bp) if bp.verified != Some(false) => {
+                painter.circle_filled(center, radius, BREAKPOINT_COLOR);
+            }
+            // The debugger couldn't place it (no code there, or not loaded yet).
+            Some(_) => {
+                painter.circle(center, radius - 0.75, Color32::TRANSPARENT, Stroke::new(1.5_f32, BREAKPOINT_COLOR));
+            }
+            None if hovered_line == Some(line) => {
+                painter.circle_filled(center, radius, BREAKPOINT_COLOR.gamma_multiply(0.35));
+            }
+            None => {}
+        }
+        if editor.exec_line() == Some(line) {
+            paint_exec_arrow(&painter, center, radius);
+        }
+        if numbers {
+            let color = if line == head_line { strong } else { weak };
+            painter.text(
+                pos2(gutter.right() - style.char_width * 0.5, y),
+                Align2::RIGHT_TOP,
+                (line + 1).to_string(),
+                style.font.clone(),
+                color,
+            );
+        }
     }
+}
+
+/// The yellow arrow pointing at the line the debugger is stopped on.
+fn paint_exec_arrow(painter: &egui::Painter, center: Pos2, radius: f32) {
+    let h = radius * 1.15; // half height
+    let left = center.x - radius * 1.3;
+    let right = center.x + radius * 1.3;
+    let neck = center.x + radius * 0.1;
+    let points = vec![
+        pos2(left, center.y - h * 0.45),
+        pos2(neck, center.y - h * 0.45),
+        pos2(neck, center.y - h),
+        pos2(right, center.y),
+        pos2(neck, center.y + h),
+        pos2(neck, center.y + h * 0.45),
+        pos2(left, center.y + h * 0.45),
+    ];
+    // egui fills convex shapes only: draw the shaft and the head separately.
+    painter.add(egui::Shape::convex_polygon(
+        vec![points[0], points[1], points[5], points[6]],
+        EXEC_COLOR,
+        Stroke::NONE,
+    ));
+    painter.add(egui::Shape::convex_polygon(vec![points[2], points[3], points[4]], EXEC_COLOR, Stroke::NONE));
+    let outline = Stroke::new(1.0_f32, Color32::from_rgb(0x80, 0x60, 0x00));
+    painter.add(egui::Shape::closed_line(points, outline));
 }
 
 // ---- Mouse -------------------------------------------------------------------
@@ -565,4 +651,91 @@ fn outdent(editor: &mut Editor, lines: RangeInclusive<usize>) {
     let anchor = editor.buffer().line_range(*lines.start()).start;
     let head = editor.buffer().line_range(*lines.end()).end - removed;
     editor.edit(changes, Selection { anchor, head }, EditKind::Other);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Draw the editor headlessly; returns the shapes painted.
+    fn render(editor: &mut Editor, ctx: &egui::Context, events: Vec<Event>) -> Vec<egui::Shape> {
+        let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0));
+        let prefs = Preferences::default();
+        let output = ctx.run(egui::RawInput { screen_rect: Some(screen), events, ..Default::default() }, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                editor_view(ui, editor, "test_editor", &prefs, None);
+            });
+        });
+        output.shapes.into_iter().map(|clipped| clipped.shape).collect()
+    }
+
+    fn filled_rects(shapes: &[egui::Shape], color: Color32) -> Vec<Rect> {
+        shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Rect(r) if r.fill == color => Some(r.rect),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn circles(shapes: &[egui::Shape]) -> Vec<egui::epaint::CircleShape> {
+        shapes
+            .iter()
+            .filter_map(|s| match s {
+                egui::Shape::Circle(c) => Some(*c),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn gutter_click_toggles_and_markers_are_drawn() {
+        let text: String = (0..20).map(|i| format!("line {i}\n")).collect();
+        let mut editor = Editor::new(text, None);
+        let ctx = egui::Context::default();
+        let shapes = render(&mut editor, &ctx, vec![]);
+        assert!(circles(&shapes).is_empty());
+
+        // Find line 4's number, then click in the margin to its left.
+        let row = ctx.fonts(|f| f.row_height(&FontId::monospace(Preferences::default().font_size)));
+        let number = shapes
+            .iter()
+            .find_map(|s| match s {
+                egui::Shape::Text(t) if t.galley.text() == "5" => Some(t.pos),
+                _ => None,
+            })
+            .expect("line number 5 drawn");
+        let click = pos2(4.0 + row * 0.5, number.y + row * 0.5);
+        let button = |pressed| Event::PointerButton { pos: click, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        render(&mut editor, &ctx, vec![Event::PointerMoved(click), button(true)]);
+        render(&mut editor, &ctx, vec![button(false)]);
+        assert_eq!(editor.breakpoint_lines(), [4]);
+
+        // A red dot in the margin, a red tint across the line.
+        let shapes = render(&mut editor, &ctx, vec![]);
+        let dots: Vec<_> = circles(&shapes).into_iter().filter(|c| c.fill == BREAKPOINT_COLOR).collect();
+        assert_eq!(dots.len(), 1);
+        assert!((dots[0].center.y - click.y).abs() < 1.0, "{dots:?} vs {click:?}");
+        let tints = filled_rects(&shapes, BREAKPOINT_LINE);
+        assert_eq!(tints.len(), 1);
+        assert!(tints[0].width() > 300.0 && (tints[0].center().y - click.y).abs() < 1.0);
+
+        // Stopped there: the yellow arrow and tint.
+        editor.set_exec_line(Some(4));
+        let shapes = render(&mut editor, &ctx, vec![]);
+        let arrow = shapes.iter().any(|s| matches!(s, egui::Shape::Path(p) if p.fill == EXEC_COLOR));
+        assert!(arrow, "no arrow drawn");
+        assert_eq!(filled_rects(&shapes, EXEC_LINE).len(), 1);
+
+        // An unplaced breakpoint is a ring, not a dot.
+        editor.set_breakpoint_verified(4, Some(false));
+        let shapes = render(&mut editor, &ctx, vec![]);
+        assert!(circles(&shapes).iter().any(|c| c.fill == Color32::TRANSPARENT && c.stroke.color == BREAKPOINT_COLOR));
+
+        // Clicking again removes it.
+        render(&mut editor, &ctx, vec![Event::PointerMoved(click), button(true)]);
+        render(&mut editor, &ctx, vec![button(false)]);
+        assert!(editor.breakpoint_lines().is_empty());
+    }
 }

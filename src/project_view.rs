@@ -16,6 +16,7 @@ use std::sync::Arc;
 use egui::{pos2, vec2, Color32, RichText, Sense, Shape, Stroke, TextStyle, TextWrapMode, Ui, WidgetText};
 use rayon::prelude::*;
 
+use crate::build::{BuildModel, BuildProject};
 use crate::document::path_key;
 use crate::project::{
     file_name, load_solution, load_vcxproj, Folder, Project, ProjectError, Solution, SolutionTreeFolder,
@@ -63,6 +64,8 @@ pub struct ProjectView {
     /// Every file Find in Files searches: all of the solution's files except
     /// images and unresolvable paths, deduplicated.
     search_files: Arc<Vec<PathBuf>>,
+    /// Configurations and projects for the build toolbar.
+    build: BuildModel,
     /// [`path_key`] of every file in the solution.
     file_keys: HashSet<PathBuf>,
     /// The tree, with the invisible root at index 0.
@@ -104,11 +107,28 @@ impl ProjectView {
                 .collect();
             builder.warnings.extend(solution.warnings.iter().cloned());
             builder.add_solution_folder(0, &solution, &projects, &solution.tree().root);
+            // What the toolbar needs to build and run: configurations, and each
+            // C++ project's mappings and settings.
+            let build_projects = solution
+                .projects
+                .iter()
+                .zip(&projects)
+                .filter_map(|(info, loaded)| match loaded {
+                    Ok(Some(project)) => {
+                        let mut build = BuildProject::from_project(project, info.configurations.clone());
+                        build.name = info.name.clone();
+                        Some(build)
+                    }
+                    _ => None,
+                })
+                .collect();
+            builder.build = BuildModel::for_solution(&solution.path, solution.configurations.clone(), build_projects);
             let title = format!("Solution '{}' ({} projects)", solution.name, solution.projects.len());
             (solution.path.clone(), title)
         } else {
             let project = load_vcxproj(path)?;
             builder.add_project(0, &project);
+            builder.build = BuildModel::for_project(&project);
             (project.path.clone(), project.name.clone())
         };
         Ok(builder.finish(path, title))
@@ -132,6 +152,11 @@ impl ProjectView {
     }
 
     /// The files Find in Files searches (shared, cheap to clone).
+    /// Configurations and projects for the build toolbar.
+    pub fn build_model(&self) -> &BuildModel {
+        &self.build
+    }
+
     pub fn search_files(&self) -> Arc<Vec<PathBuf>> {
         self.search_files.clone()
     }
@@ -389,6 +414,7 @@ struct TreeBuilder {
     object_macros: Option<PathBuf>,
     /// Module names from `<Module>.Build.cs` files.
     modules: Vec<String>,
+    build: BuildModel,
 }
 
 impl TreeBuilder {
@@ -521,6 +547,7 @@ impl TreeBuilder {
             warnings: self.warnings,
             index_files: self.index_files,
             search_files: Arc::new(self.search_files),
+            build: self.build,
             file_keys: self.seen_files,
             unreal_engine: self
                 .object_macros

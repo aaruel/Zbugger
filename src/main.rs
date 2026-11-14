@@ -4,11 +4,14 @@
 mod profiling;
 
 mod app;
+mod build;
+mod debug;
 mod document;
 mod editor;
 mod find;
 mod image_view;
 mod navigation;
+mod output_panel;
 mod preferences;
 mod project;
 mod project_view;
@@ -16,6 +19,7 @@ mod search;
 mod search_panel;
 mod symbols;
 mod syntax;
+mod toolbar;
 mod unreal;
 
 /// mimalloc serves Rust's allocations: much faster than the Windows heap for

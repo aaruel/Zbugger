@@ -132,7 +132,7 @@ impl DefinitionPicker {
                     });
                 });
                 ui.separator();
-                ui.label(RichText::new("↑↓ to choose, Enter to open, Esc to cancel").weak().small());
+                ui.label(RichText::new("⬆⬇ to choose, Enter to open, Esc to cancel").weak().small());
             });
         match (chosen, open) {
             (Some(symbol), _) => PickerResult::Chosen(symbol),

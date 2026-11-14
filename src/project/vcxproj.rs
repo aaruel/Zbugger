@@ -67,6 +67,12 @@ pub fn load_vcxproj(path: &Path) -> Result<Project, ProjectError> {
     // The main project file must load; everything else is best-effort.
     loader.load_file(&path)?;
     loader.load_filters(&filters_path(&path));
+    // Per-user settings (debugger command and arguments...) come last, so
+    // they win, as in MSBuild.
+    let user_file = PathBuf::from(format!("{}.user", path.display()));
+    if user_file.is_file() {
+        loader.load_property_file(&user_file, 0);
+    }
 
     let mut project = loader.finish();
     if let Some(name) = project.property("ProjectName", None) {
@@ -105,13 +111,7 @@ impl Loader {
 
         for node in elements(root) {
             match node.tag_name().name() {
-                "PropertyGroup" => self.project.property_groups.push(PropertyGroup {
-                    label: node.attribute("Label").map(str::to_owned),
-                    condition: node.attribute("Condition").map(str::to_owned),
-                    properties: elements(node)
-                        .map(|p| (p.tag_name().name().to_owned(), p.text().unwrap_or("").trim().to_owned()))
-                        .collect(),
-                }),
+                "PropertyGroup" => self.project.property_groups.extend(property_groups(node)),
                 "ItemGroup" => {
                     for item in elements(node) {
                         self.read_item(item, &file_dir);
@@ -177,8 +177,53 @@ impl Loader {
 
     /// Follow `<Import>`s of shared-items projects, whose files belong to this
     /// project. Other imports (`.props`, `.targets`) are build machinery and skipped.
+    /// Read just the `<PropertyGroup>`s of a property sheet (`.props`) or a
+    /// `.vcxproj.user` file, following its own `.props` imports.
+    fn load_property_file(&mut self, file: &Path, depth: usize) {
+        if depth > 4 {
+            return;
+        }
+        let Ok(text) = read_text(file) else { return };
+        let Ok(doc) = Document::parse(&text) else {
+            self.project.warnings.push(format!("{} is not valid XML", file.display()));
+            return;
+        };
+        let file_dir = file.parent().unwrap_or(Path::new("")).to_path_buf();
+        for node in elements(doc.root_element()) {
+            let imports: Vec<Node> = match node.tag_name().name() {
+                "PropertyGroup" => {
+                    self.project.property_groups.extend(property_groups(node));
+                    continue;
+                }
+                "Import" => vec![node],
+                "ImportGroup" => elements(node).filter(|n| n.tag_name().name() == "Import").collect(),
+                _ => continue,
+            };
+            for import in imports {
+                let Some(target) = import.attribute("Project") else { continue };
+                if !target.to_ascii_lowercase().ends_with(".props") {
+                    continue;
+                }
+                let (path, unresolved) = self.resolve(target, &file_dir);
+                if !unresolved && path.is_file() {
+                    self.load_property_file(&path, depth + 1);
+                }
+            }
+        }
+    }
+
     fn read_import(&mut self, import: Node, file_dir: &Path) {
         let Some(target) = import.attribute("Project") else { return };
+        if target.to_ascii_lowercase().ends_with(".props") {
+            // Local property sheets (like Unreal's UECommon.props) define
+            // settings the build uses. System ones ($(VCTargetsPath)...) don't
+            // resolve and are skipped.
+            let (path, unresolved) = self.resolve(target, file_dir);
+            if !unresolved && path.is_file() {
+                self.load_property_file(&path, 0);
+            }
+            return;
+        }
         if !target.to_ascii_lowercase().ends_with(".vcxitems") {
             return;
         }
@@ -294,6 +339,36 @@ impl Loader {
         out.push_str(rest);
         (out, unresolved)
     }
+}
+
+/// A `<PropertyGroup>` as one or more groups: properties with their own
+/// `Condition` (as CMake writes them, e.g. one `OutDir` per configuration)
+/// become groups of their own, in order, so "last one wins" still holds.
+fn property_groups(node: Node) -> Vec<PropertyGroup> {
+    let label = node.attribute("Label").map(str::to_owned);
+    let group_condition = node.attribute("Condition").map(str::to_owned);
+    let mut groups = Vec::new();
+    let mut current = PropertyGroup { label: label.clone(), condition: group_condition.clone(), properties: Vec::new() };
+    for property in elements(node) {
+        let entry = (property.tag_name().name().to_owned(), property.text().unwrap_or("").trim().to_owned());
+        match property.attribute("Condition") {
+            Some(condition) => {
+                if !current.properties.is_empty() {
+                    groups.push(std::mem::replace(
+                        &mut current,
+                        PropertyGroup { label: label.clone(), condition: group_condition.clone(), properties: Vec::new() },
+                    ));
+                }
+                // The property's own condition is the one that decides.
+                groups.push(PropertyGroup { label: label.clone(), condition: Some(condition.to_owned()), properties: vec![entry] });
+            }
+            None => current.properties.push(entry),
+        }
+    }
+    if !current.properties.is_empty() || groups.is_empty() {
+        groups.push(current);
+    }
+    groups
 }
 
 /// Child elements of `node`, skipping text and comments.

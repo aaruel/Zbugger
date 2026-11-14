@@ -16,7 +16,7 @@ mod tests;
 mod vcxproj;
 mod wildcard;
 
-pub use solution::{load_solution, Solution, SolutionTreeFolder};
+pub use solution::{load_solution, ConfigurationMapping, Solution, SolutionTreeFolder};
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -121,18 +121,7 @@ impl Project {
     /// understood; groups with other conditions are skipped. Values are not
     /// macro-expanded.
     pub fn property(&self, name: &str, config: Option<&Configuration>) -> Option<&str> {
-        let key = config.map(Configuration::key);
-        self.property_groups
-            .iter()
-            .filter(|group| match (&group.condition, &key) {
-                (None, _) => true,
-                (Some(condition), Some(key)) => condition_config(condition).is_some_and(|c| c.eq_ignore_ascii_case(key)),
-                (Some(_), None) => false,
-            })
-            .flat_map(|group| group.properties.iter())
-            .filter(|(n, _)| n == name)
-            .map(|(_, v)| v.as_str())
-            .last()
+        property_in(&self.property_groups, name, config)
     }
 
     /// Group the items into the folder tree the project view shows.
@@ -151,6 +140,23 @@ impl Project {
         root.sort(&self.items);
         ProjectTree { root }
     }
+}
+
+/// The last value of property `name` in `groups` that applies to `config`
+/// (or to all configurations); see [`Project::property`].
+pub fn property_in<'a>(groups: &'a [PropertyGroup], name: &str, config: Option<&Configuration>) -> Option<&'a str> {
+    let key = config.map(Configuration::key);
+    groups
+        .iter()
+        .filter(|group| match (&group.condition, &key) {
+            (None, _) => true,
+            (Some(condition), Some(key)) => condition_config(condition).is_some_and(|c| c.eq_ignore_ascii_case(key)),
+            (Some(_), None) => false,
+        })
+        .flat_map(|group| group.properties.iter())
+        .filter(|(n, _)| n == name)
+        .map(|(_, v)| v.as_str())
+        .last()
 }
 
 /// The condition `'$(Configuration)|$(Platform)'=='Debug|x64'` → `Debug|x64`.
